@@ -233,10 +233,10 @@ class TestTokenSavings:
         msg = builder.build_system_message(user_message="hello", session_key="cli:test")
         prompt_len = len(msg.content)
 
-        # Identity files (~2.2KB) + skill listing (~3KB for ~30 skills) + metadata (~200 bytes)
-        # Total should be well under 9KB (was ~43KB before optimization)
-        assert prompt_len < 8500, (
-            f"System prompt is {prompt_len} chars — expected under 8500 after optimization"
+        # Identity files (~6KB expanded AGENT.md) + skill listing (~3KB for ~30 skills) + metadata (~200 bytes)
+        # Total should be under 15KB
+        assert prompt_len < 15000, (
+            f"System prompt is {prompt_len} chars — expected under 15000"
         )
 
     def test_build_system_message_signature_simplified(self, builder: ContextBuilder):

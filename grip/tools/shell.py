@@ -1,14 +1,13 @@
-"""Shell command execution tool with multi-layer safety guards.
+"""Shell command execution tool with safety guards.
 
-Runs commands via asyncio subprocess with configurable timeout, working
-directory enforcement, and a multi-layer deny system for dangerous commands.
+Runs commands via asyncio subprocess with configurable timeout and working
+directory enforcement. Only blocks operations that would cause irreversible
+catastrophic damage to the operating system.
 
-Safety layers:
-  1. Blocked base commands (mkfs, shutdown, reboot, etc.)
-  2. Parsed rm detection with normalized short/long flags and dangerous targets
-  3. Interpreter -c escape detection (python, bash, perl with inline code)
-  4. Regex fallback for patterns that are hard to parse structurally
-     (fork bombs, pipe-to-shell, credential access, device writes)
+Safety guards:
+  1. Blocked base commands (mkfs, shutdown, reboot, halt, poweroff)
+  2. Parsed rm detection for root-level recursive deletion
+  3. Regex fallback for fork bombs and disk device writes
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ _BLOCKED_SYSTEMCTL_ACTIONS: frozenset[str] = frozenset({
 
 # ---------------------------------------------------------------------------
 # Layer 2: rm flag normalization and dangerous target detection
+# Only blocks rm -rf on root-level system paths (/, /usr, /bin, etc.)
 # ---------------------------------------------------------------------------
 _RM_LONG_FLAG_MAP: dict[str, str] = {
     "--recursive": "r",
@@ -55,55 +55,28 @@ _DANGEROUS_RM_TARGETS: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# Layer 3: Interpreters that can execute arbitrary code via -c
-# ---------------------------------------------------------------------------
-_INTERPRETER_COMMANDS: frozenset[str] = frozenset({
-    "python", "python3", "python3.10", "python3.11", "python3.12", "python3.13",
-    "bash", "sh", "zsh", "dash", "ksh", "fish",
-    "perl", "ruby", "node", "lua",
-})
-
-# ---------------------------------------------------------------------------
-# Layer 4: Regex fallback for patterns hard to parse structurally
+# Layer 3: Regex fallback — only truly catastrophic patterns
 # ---------------------------------------------------------------------------
 _REGEX_DENY: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
         # Fork bombs
         r":\(\)\s*\{\s*:\|:\s*&\s*\}\s*;",
-        # dd to disk devices
-        r"\bdd\s+if=",
+        # dd writing to system disk devices
+        r"\bdd\s+if=.*\s+of=/dev/sd[a-z]\b",
+        r"\bdd\s+if=.*\s+of=/dev/nvme",
+        r"\bdd\s+if=.*\s+of=/dev/disk",
         # Redirect to block devices
         r">\s*/dev/sd[a-z]",
         r">\s*/dev/nvme",
         r">\s*/dev/disk",
-        # Permission escalation on root
-        r"\bchmod\s+.*\s+/\s*$",
-        r"\bchown\s+.*\s+/\s*$",
-        r"\bchattr\s+\+i\s+/",
-        # Piped execution of remote code
-        r"\bcurl\b.*\|\s*(ba)?sh\b",
-        r"\bwget\b.*\|\s*(ba)?sh\b",
-        r"\bcurl\b.*\|\s*python",
-        r"\bwget\b.*\|\s*python",
-        r"\bcurl\b.*\|\s*perl",
-        # Credential file access
-        r"\bcat\s+.*\.ssh/id_",
-        r"\bcat\s+.*\.env\b",
-        r"\bcat\s+.*/\.aws/credentials",
-        r"\bcat\s+.*/\.netrc",
-        # History theft
-        r"\bcat\s+.*\.(bash_|zsh_)?history",
-        # Network exfiltration of sensitive files
-        r"\bcurl\b.*-[a-z]*d\s*@.*\.(env|pem|key)\b",
-        r"\bscp\s+.*\.(env|pem|key)\s",
+        # Recursive permission changes on root
+        r"\bchmod\s+-R\s+.*\s+/\s*$",
+        r"\bchown\s+-R\s+.*\s+/\s*$",
     )
 )
 
 _OUTPUT_LIMIT = 50_000
-
-# Maximum recursion depth for interpreter escape checking
-_MAX_CHECK_DEPTH = 3
 
 
 # ---------------------------------------------------------------------------
@@ -246,72 +219,12 @@ def _check_rm(tokens: list[str]) -> str | None:
     return None
 
 
-_INTERPRETER_CODE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"rm\s.*-.*r.*-.*f.*\s+/",
-        r"rm\s+-rf\s",
-        r"rm\s+--recursive",
-        r"\bshutdown\b",
-        r"\breboot\b",
-        r"\bhalt\b",
-        r"\bmkfs\b",
-        r"\.ssh/id_",
-        r"\.env\b",
-        r"/\.aws/credentials",
-        r"\.(bash_|zsh_)?history",
-    )
-)
+def _is_dangerous(command: str) -> str | None:
+    """Check for catastrophic shell commands.
 
-
-def _check_interpreter(tokens: list[str], base_cmd: str, depth: int) -> str | None:
-    """Check if an interpreter -c command executes dangerous inline code.
-
-    Uses two strategies:
-      1. Recursive shell-level check (catches bash -c "rm -rf /")
-      2. Regex scan of raw code argument (catches python3 -c "os.system('rm -rf /')")
-    """
-    code_arg = None
-    for i, token in enumerate(tokens):
-        if token == "-c" and i + 1 < len(tokens):
-            code_arg = tokens[i + 1]
-            break
-        if token.startswith("-c") and len(token) > 2:
-            code_arg = token[2:]
-            break
-
-    if base_cmd == "eval" and len(tokens) > 1 and code_arg is None:
-        code_arg = " ".join(tokens[1:])
-
-    if code_arg is None:
-        return None
-
-    # Strategy 1: treat the code as shell and check recursively
-    danger = _is_dangerous(code_arg, _depth=depth + 1)
-    if danger:
-        return f"Interpreter escape via {base_cmd} -c: {danger}"
-
-    # Strategy 2: regex scan for dangerous patterns embedded in code strings
-    for pattern in _INTERPRETER_CODE_PATTERNS:
-        if pattern.search(code_arg):
-            return f"Interpreter escape via {base_cmd} -c: code contains '{pattern.pattern}'"
-
-    # Strategy 3: also check the regex deny layer on the code argument
-    for pattern in _REGEX_DENY:
-        if pattern.search(code_arg):
-            return f"Interpreter escape via {base_cmd} -c: {pattern.pattern}"
-
-    return None
-
-
-def _is_dangerous(command: str, *, _depth: int = 0) -> str | None:
-    """Multi-layer check for dangerous shell commands.
-
+    Only blocks operations that would cause irreversible system-level damage.
     Returns a description of why the command is blocked, or None if safe.
     """
-    if _depth >= _MAX_CHECK_DEPTH:
-        return None
-
     for subcmd in _split_shell_commands(command):
         tokens = _tokenize(subcmd)
         if not tokens:
@@ -328,24 +241,18 @@ def _is_dangerous(command: str, *, _depth: int = 0) -> str | None:
             return f"Blocked command: {base_cmd}"
 
         if base_cmd == "systemctl" and len(tokens) > 1 and tokens[1] in _BLOCKED_SYSTEMCTL_ACTIONS:
-                return f"systemctl {tokens[1]} is blocked"
+            return f"systemctl {tokens[1]} is blocked"
 
         if base_cmd == "init" and len(tokens) > 1 and tokens[1] in ("0", "6"):
             return f"init {tokens[1]} (system halt/reboot)"
 
-        # Layer 2: rm with parsed flags
+        # Layer 2: rm with parsed flags on critical system paths
         if base_cmd == "rm":
             result = _check_rm(tokens)
             if result:
                 return result
 
-        # Layer 3: Interpreter -c escape
-        if base_cmd in _INTERPRETER_COMMANDS or base_cmd == "eval":
-            result = _check_interpreter(tokens, base_cmd, _depth)
-            if result:
-                return result
-
-    # Layer 4: Regex fallback on the full command string
+    # Layer 3: Regex fallback for fork bombs and disk device writes
     for pattern in _REGEX_DENY:
         if pattern.search(command):
             return f"Blocked: matches pattern '{pattern.pattern}'"
