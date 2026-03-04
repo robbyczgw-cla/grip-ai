@@ -105,7 +105,7 @@ async def _search_perplexity(client: httpx.AsyncClient, *, query: str, max_resul
         "https://api.kilo.ai/v1/chat/completions",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={
-            "model": "sonar",
+            "model": "perplexity/sonar-pro",
             "messages": [
                 {"role": "system", "content": "Answer with concise web-grounded synthesis and cite sources."},
                 {"role": "user", "content": query},
@@ -154,7 +154,7 @@ async def search_web_plus(query: str, max_results: int = 5, *, extra: dict[str, 
     keys = {
         "serper": _get_key(extra, "serper_api_key", ["SERPER_API_KEY"]),
         "tavily": _get_key(extra, "tavily_api_key", ["TAVILY_API_KEY"]),
-        "perplexity": _get_key(extra, "perplexity_api_key", ["PERPLEXITY_API_KEY", "PPLX_API_KEY"]),
+        "perplexity": _get_key(extra, "perplexity_api_key", ["PERPLEXITY_API_KEY", "PPLX_API_KEY"]) or _get_key(extra, "kilocode_api_key", ["KILOCODE_API_KEY"]),
         "exa": _get_key(extra, "exa_api_key", ["EXA_API_KEY"]),
     }
 
@@ -173,7 +173,7 @@ async def search_web_plus(query: str, max_results: int = 5, *, extra: dict[str, 
                 rows = await searchers[provider](client, query=query, max_results=max_results, api_key=keys[provider])
                 if rows:
                     text = "\n\n".join(
-                        f"[{provider}] **{r.get(title,)}**\n{r.get(url,)}\n{r.get(snippet,)}" for r in rows
+                        f"[{provider}] **{r.get("title", "")}**\n{r.get("url", "")}\n{r.get("snippet", "")}" for r in rows
                     )
                     return provider, text, errors
             except Exception as exc:  # noqa: BLE001
