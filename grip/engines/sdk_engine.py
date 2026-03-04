@@ -20,9 +20,12 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from collections.abc import Mapping
+
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    HookMatcher,
     ClaudeSDKClient,
     CLIConnectionError,
     ResultMessage,
@@ -363,6 +366,94 @@ class SDKRunner(EngineProtocol):
 
         return tools
 
+    def _build_subagent_hooks(self, session_key: str) -> dict[str, Any]:
+        """Build SDK hooks for subagent start/stop observability only."""
+
+        memory_mgr = self._memory_mgr
+
+        def _extract_nested(mapping: Mapping[str, Any], *paths: tuple[str, ...]) -> Any:
+            for path in paths:
+                cur: Any = mapping
+                ok = True
+                for key in path:
+                    if isinstance(cur, Mapping) and key in cur:
+                        cur = cur[key]
+                    else:
+                        ok = False
+                        break
+                if ok and cur is not None:
+                    return cur
+            return None
+
+        async def on_subagent_start(input_data, tool_use_id, context) -> dict[str, Any]:
+            prompt = _extract_nested(input_data, ("prompt",), ("user_prompt",), ("input", "prompt"))
+            model = _extract_nested(input_data, ("model",), ("agent_model",), ("input", "model"))
+            depth = _extract_nested(input_data, ("depth",), ("subagent_depth",), ("input", "depth"))
+            agent_id = input_data.get("agent_id", "")
+            agent_type = input_data.get("agent_type", "")
+
+            logger.info(
+                "SubagentStart: session={} agent_id={} type={} model={} depth={} prompt={}",
+                input_data.get("session_id", ""),
+                agent_id,
+                agent_type,
+                model or "unknown",
+                depth if depth is not None else "unknown",
+                (str(prompt)[:300] if prompt else ""),
+            )
+            if memory_mgr:
+                memory_mgr.append_history(
+                    "[SubagentStart] ({}) id={} type={} model={} depth={} prompt={}".format(
+                        session_key,
+                        agent_id,
+                        agent_type,
+                        model or "unknown",
+                        depth if depth is not None else "unknown",
+                        str(prompt)[:180] if prompt else "",
+                    )
+                )
+            return {}
+
+        async def on_subagent_stop(input_data, tool_use_id, context) -> dict[str, Any]:
+            result_summary = _extract_nested(input_data, ("result_summary",), ("result",), ("output",), ("input", "result"))
+            usage = _extract_nested(input_data, ("usage",), ("token_usage",), ("input", "usage"))
+            tokens_used = _extract_nested(
+                input_data,
+                ("total_tokens",),
+                ("tokens_used",),
+                ("usage", "total_tokens"),
+                ("usage", "totalTokens"),
+                ("usage", "output_tokens"),
+            )
+            agent_id = input_data.get("agent_id", "")
+            agent_type = input_data.get("agent_type", "")
+
+            logger.info(
+                "SubagentStop: session={} agent_id={} type={} tokens={} summary={} usage={}",
+                input_data.get("session_id", ""),
+                agent_id,
+                agent_type,
+                tokens_used if tokens_used is not None else "unknown",
+                (str(result_summary)[:300] if result_summary else ""),
+                str(usage)[:300] if usage else "",
+            )
+            if memory_mgr:
+                memory_mgr.append_history(
+                    "[SubagentStop] ({}) id={} type={} tokens={} summary={}".format(
+                        session_key,
+                        agent_id,
+                        agent_type,
+                        tokens_used if tokens_used is not None else "unknown",
+                        str(result_summary)[:180] if result_summary else "",
+                    )
+                )
+            return {}
+
+        return {
+            "SubagentStart": [HookMatcher(hooks=[on_subagent_start])],
+            "SubagentStop": [HookMatcher(hooks=[on_subagent_stop])],
+        }
+
     # -- EngineProtocol implementation --
 
     async def run(
@@ -440,6 +531,7 @@ class SDKRunner(EngineProtocol):
             allowed_tools=final_allowed_tools,
             env=env_opts if env_opts else None,
             extra_args=extra_args if extra_args else {},
+            hooks=self._build_subagent_hooks(session_key),
         )
 
         tool_calls_made: list[str] = []
