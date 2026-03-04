@@ -129,7 +129,7 @@ class AgentDefaults(BaseModel):
     )
     sdk_permission_mode: str = Field(
         default="acceptEdits",
-        description="SDK permission mode: 'acceptEdits', 'bypassPermissions', or 'default'.",
+        description="SDK permission mode: 'acceptEdits', 'bypassPermissions', 'dontAsk', or 'default'.",
     )
     sdk_effort: str | None = Field(
         default="medium",
