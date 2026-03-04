@@ -422,20 +422,11 @@ class SDKRunner(EngineProtocol):
         if sdk_effort:
             extra_args["effort"] = sdk_effort
 
-        # Always include core Claude built-in tools + grip MCP tools.
-        # When no external MCP restrictions: use explicit list to ensure WebSearch etc. are allowed.
+        # Pass None to allow all tools (built-in + MCP).
+        # Only restrict if external MCP servers explicitly define allowed tools.
         grip_tool_names = set(custom_tool_names)
         external_restrictions = [t for t in allowed_tools if t not in grip_tool_names]
-        if external_restrictions:
-            final_allowed_tools = allowed_tools
-        else:
-            # Explicitly allow all core Claude tools + grip MCP tools
-            core_tools = [
-                "Bash", "Read", "Write", "Edit", "Glob", "Grep",
-                "WebSearch", "WebFetch", "TodoWrite", "Agent",
-                "NotebookEdit", "TaskOutput", "TaskStop",
-            ]
-            final_allowed_tools = core_tools + list(custom_tool_names)
+        final_allowed_tools = allowed_tools if external_restrictions else None
 
         options = ClaudeAgentOptions(
             model=effective_model,
