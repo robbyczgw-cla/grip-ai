@@ -56,3 +56,43 @@
 - Channel aktiv, Token in config
 - Bot: @Robgripbot
 
+
+## 🎙️ Telegram Voice + ElevenLabs
+
+### Voice message transcription (new)
+- Telegram `on_voice()` now downloads incoming voice files and transcribes with **ElevenLabs Scribe v1** (`/v1/speech-to-text`)
+- Transcript is injected into normal inbound chat flow (same path as user-typed text)
+- Friendly user-facing error messages on missing API key / failed transcription
+- Config key: `tools.extra.elevenlabs_api_key`
+
+### Optional voice replies via ElevenLabs TTS (new)
+- Telegram outbound `send()` supports optional TTS mode
+- When `tools.extra.tts_enabled=true`, bot synthesizes reply audio with ElevenLabs and sends as Telegram voice message
+- Voice: **Jessica** (`cgSgspJ2msm6clMCkdW9`)
+- Default remains text replies (`tts_enabled=false`)
+
+---
+
+## 🛠 Native Tools Added (2026-03-04)
+
+Added 3 new SDK-native tools in `grip/engines/sdk_engine.py` (registered with `@tool`, same pattern as `remember/recall/web_search`):
+
+- `get_weather(location: str, days: int = 1)`
+  - Uses `wttr.in` JSON API (`?format=j1`)
+  - Returns current temperature, conditions, humidity, wind, and multi-day forecast summary
+
+- `youtube_transcript(video_url: str)`
+  - Uses Apify actor `bernardo_apartado~youtube-transcript-downloader`
+  - Polls run status until completion, then fetches transcript text from dataset
+  - Caches transcripts in `~/.grip/cache/youtube/<video_id>.json`
+  - Reads token from `tools.extra.apify_api_token` (fallback: `APIFY_API_TOKEN` env)
+
+- `twitter_search(query: str, max_results: int = 10)`
+  - Uses Apify Twitter actor `CJdippxWmn9uRfooo`
+  - Supports search query, `@username`, and profile/status URL input patterns
+  - Caches rendered results in `~/.grip/cache/twitter/`
+  - Reads token from `tools.extra.apify_api_token` (fallback: `APIFY_API_TOKEN` env)
+
+Also updated `/root/.grip/config.json` to include `tools.extra.apify_api_token` and created cache directories:
+- `~/.grip/cache/youtube/`
+- `~/.grip/cache/twitter/`

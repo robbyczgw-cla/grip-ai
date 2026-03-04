@@ -15,7 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
+import re
+import time
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -339,6 +344,270 @@ class SDKRunner(EngineProtocol):
             return runner_ref._text_result("Web search unavailable.")
 
         tools.append(web_search)
+
+        @tool(
+            "get_weather",
+            "Get current weather and forecast for a location via wttr.in.",
+            {"location": str, "days": int},
+        )
+        async def get_weather(args: dict[str, Any]) -> dict[str, Any]:
+            import requests
+
+            location = (args.get("location") or "").strip()
+            if not location:
+                return runner._text_result("Missing location.")
+
+            try:
+                days = int(args.get("days", 1))
+            except Exception:
+                days = 1
+            days = max(1, min(days, 5))
+
+            def _fetch_weather() -> dict[str, Any]:
+                resp = requests.get(f"https://wttr.in/{location}?format=j1", timeout=10)
+                resp.raise_for_status()
+                return resp.json()
+
+            try:
+                data = await asyncio.to_thread(_fetch_weather)
+            except Exception as exc:
+                return runner._text_result(f"Failed to fetch weather: {exc}")
+
+            current = (data.get("current_condition") or [{}])[0]
+            cond = ((current.get("weatherDesc") or [{}])[0] or {}).get("value", "Unknown")
+            lines = [
+                f"Weather for {location}",
+                f"Current: {current.get('temp_C', '?')}°C, {cond}, humidity {current.get('humidity', '?')}%, wind {current.get('windspeedKmph', '?')} km/h {current.get('winddir16Point', '?')}",
+                "",
+                f"Forecast ({days} day{'s' if days != 1 else ''}):",
+            ]
+
+            for day in (data.get("weather") or [])[:days]:
+                date = day.get("date", "?")
+                desc = "Unknown"
+                hourly = day.get("hourly") or []
+                if hourly:
+                    desc = ((hourly[0].get("weatherDesc") or [{}])[0] or {}).get("value", "Unknown")
+                lines.append(f"- {date}: {day.get('mintempC', '?')}°C to {day.get('maxtempC', '?')}°C, {desc}")
+
+            return runner._text_result("\\n".join(lines))
+
+        tools.append(get_weather)
+
+        @tool(
+            "youtube_transcript",
+            "Fetch transcript/captions from a YouTube video via Apify.",
+            {"video_url": str},
+        )
+        async def youtube_transcript(args: dict[str, Any]) -> dict[str, Any]:
+            import requests
+
+            video_url = (args.get("video_url") or "").strip()
+            if not video_url:
+                return runner._text_result("Missing video_url.")
+
+            cfg_tools = getattr(runner._config, "tools", None)
+            cfg_extra = getattr(cfg_tools, "extra", {}) if cfg_tools else {}
+            token = (cfg_extra.get("apify_api_token", "") if isinstance(cfg_extra, dict) else "") or os.environ.get("APIFY_API_TOKEN", "")
+            token = token.strip()
+            if not token:
+                return runner._text_result("Missing Apify token. Set tools.extra.apify_api_token or APIFY_API_TOKEN.")
+
+            def _extract_video_id(url: str) -> str | None:
+                if re.fullmatch(r"[a-zA-Z0-9_-]{11}", url):
+                    return url
+                parsed = urlparse(url)
+                if "youtu.be" in parsed.netloc:
+                    return parsed.path.lstrip("/").split("?")[0][:11] or None
+                q = parse_qs(parsed.query)
+                if q.get("v"):
+                    return q["v"][0]
+                m = re.search(r"/(?:embed|shorts|v)/([a-zA-Z0-9_-]{11})", parsed.path)
+                return m.group(1) if m else None
+
+            video_id = _extract_video_id(video_url)
+            if not video_id:
+                return runner._text_result("Could not extract YouTube video ID from URL.")
+
+            cache_dir = Path.home() / ".grip" / "cache" / "youtube"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / f"{video_id}.json"
+            if cache_file.exists():
+                try:
+                    cached = json.loads(cache_file.read_text(encoding="utf-8"))
+                    transcript = (cached.get("transcript") or "").strip()
+                    if transcript:
+                        return runner._text_result(f"[cached] Transcript for {video_id}:\\n\\n{transcript}")
+                except Exception:
+                    pass
+
+            actor_id = "bernardo_apartado~youtube-transcript-downloader"
+            base = "https://api.apify.com/v2"
+
+            def _run() -> str:
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                run = requests.post(f"{base}/acts/{actor_id}/runs", headers=headers, json={"startUrls": [{"url": video_url}]}, timeout=30)
+                run.raise_for_status()
+                run_id = run.json()["data"]["id"]
+
+                status_data = None
+                deadline = time.time() + 180
+                while time.time() < deadline:
+                    st = requests.get(f"{base}/actor-runs/{run_id}", headers={"Authorization": f"Bearer {token}"}, timeout=15)
+                    st.raise_for_status()
+                    status_data = st.json().get("data", {})
+                    status = status_data.get("status")
+                    if status == "SUCCEEDED":
+                        break
+                    if status in {"FAILED", "ABORTED", "TIMED-OUT"}:
+                        raise RuntimeError(f"Apify actor status: {status}")
+                    time.sleep(3)
+                else:
+                    raise TimeoutError("Timeout waiting for Apify actor")
+
+                ds = status_data.get("defaultDatasetId")
+                if not ds:
+                    return ""
+                items = requests.get(f"{base}/datasets/{ds}/items", headers={"Authorization": f"Bearer {token}"}, timeout=30)
+                items.raise_for_status()
+                data = items.json()
+                if not isinstance(data, list):
+                    return ""
+                parts: list[str] = []
+                for it in data:
+                    if not isinstance(it, dict):
+                        continue
+                    txt = (it.get("text") or "").strip()
+                    if txt:
+                        parts.append(txt)
+                    for c in it.get("captions") or []:
+                        if isinstance(c, dict) and c.get("text"):
+                            parts.append(str(c["text"]).strip())
+                return " ".join(p for p in parts if p).strip()
+
+            try:
+                transcript = await asyncio.to_thread(_run)
+            except Exception as exc:
+                return runner._text_result(f"Failed to fetch transcript: {exc}")
+            if not transcript:
+                return runner._text_result("No transcript text returned.")
+
+            try:
+                cache_file.write_text(json.dumps({"video_id": video_id, "video_url": video_url, "transcript": transcript}, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+            return runner._text_result(transcript)
+
+        tools.append(youtube_transcript)
+
+        @tool(
+            "twitter_search",
+            "Search X/Twitter for tweets via Apify (query, @username, or profile URL).",
+            {"query": str, "max_results": int},
+        )
+        async def twitter_search(args: dict[str, Any]) -> dict[str, Any]:
+            import requests
+
+            query = (args.get("query") or "").strip()
+            if not query:
+                return runner._text_result("Missing query.")
+            try:
+                max_results = int(args.get("max_results", 10))
+            except Exception:
+                max_results = 10
+            max_results = max(1, min(max_results, 50))
+
+            cfg_tools = getattr(runner._config, "tools", None)
+            cfg_extra = getattr(cfg_tools, "extra", {}) if cfg_tools else {}
+            token = (cfg_extra.get("apify_api_token", "") if isinstance(cfg_extra, dict) else "") or os.environ.get("APIFY_API_TOKEN", "")
+            token = token.strip()
+            if not token:
+                return runner._text_result("Missing Apify token. Set tools.extra.apify_api_token or APIFY_API_TOKEN.")
+
+            cache_dir = Path.home() / ".grip" / "cache" / "twitter"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_key = re.sub(r"[^a-zA-Z0-9._-]+", "_", query.lower())[:120]
+            cache_file = cache_dir / f"{cache_key}_{max_results}.json"
+            if cache_file.exists():
+                try:
+                    cached = json.loads(cache_file.read_text(encoding="utf-8"))
+                    if cached.get("rendered"):
+                        return runner._text_result("[cached]\\n" + cached["rendered"])
+                except Exception:
+                    pass
+
+            actor_id = "CJdippxWmn9uRfooo"
+            base = "https://api.apify.com/v2"
+            q = query.strip()
+            if q.startswith("@") and len(q) > 1:
+                input_data = {"startUrls": [{"url": f"https://x.com/{q.lstrip('@')}"}], "maxItems": max_results}
+            elif q.startswith("https://x.com/") or q.startswith("https://twitter.com/"):
+                input_data = {"startUrls": [{"url": q}], "maxItems": max_results}
+            else:
+                input_data = {"searchTerms": [q], "maxItems": max_results}
+
+            def _run() -> list[dict[str, Any]]:
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                run = requests.post(f"{base}/acts/{actor_id}/runs", headers=headers, json=input_data, timeout=30)
+                run.raise_for_status()
+                run_id = run.json()["data"]["id"]
+
+                status_data = None
+                deadline = time.time() + 180
+                while time.time() < deadline:
+                    st = requests.get(f"{base}/actor-runs/{run_id}", headers={"Authorization": f"Bearer {token}"}, timeout=15)
+                    st.raise_for_status()
+                    status_data = st.json().get("data", {})
+                    status = status_data.get("status")
+                    if status == "SUCCEEDED":
+                        break
+                    if status in {"FAILED", "ABORTED", "TIMED-OUT"}:
+                        raise RuntimeError(f"Apify actor status: {status}")
+                    time.sleep(3)
+                else:
+                    raise TimeoutError("Timeout waiting for Apify actor")
+
+                ds = status_data.get("defaultDatasetId")
+                if not ds:
+                    return []
+                items = requests.get(f"{base}/datasets/{ds}/items", headers={"Authorization": f"Bearer {token}"}, timeout=30)
+                items.raise_for_status()
+                payload = items.json()
+                return payload if isinstance(payload, list) else []
+
+            try:
+                items = await asyncio.to_thread(_run)
+            except Exception as exc:
+                return runner._text_result(f"Failed to fetch tweets: {exc}")
+            if not items:
+                return runner._text_result("No tweets returned.")
+
+            lines = [f"X/Twitter results for: {query}", f"Count: {len(items)}", ""]
+            for item in items[:max_results]:
+                author_obj = item.get("author") or item.get("user") or {}
+                author = author_obj.get("userName") or author_obj.get("screen_name") or "unknown"
+                text_val = (item.get("text") or item.get("full_text") or "").strip()
+                likes = item.get("likeCount", item.get("favorite_count", 0))
+                rts = item.get("retweetCount", item.get("retweet_count", 0))
+                replies = item.get("replyCount", item.get("conversation_count", 0))
+                tw_id = str(item.get("id") or item.get("id_str") or "")
+                url = item.get("url") or item.get("twitterUrl") or (f"https://x.com/{author}/status/{tw_id}" if tw_id and author != "unknown" else "")
+                lines.extend([
+                    f"@{author}: {text_val}",
+                    f"Likes {likes} | RTs {rts} | Replies {replies}",
+                    url,
+                    "",
+                ])
+
+            rendered = "\\n".join(lines).strip()
+            try:
+                cache_file.write_text(json.dumps({"query": query, "max_results": max_results, "rendered": rendered, "count": len(items)}, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            return runner._text_result(rendered)
+
+        tools.append(twitter_search)
 
         try:
             import yfinance  # noqa: F401
