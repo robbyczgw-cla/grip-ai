@@ -62,6 +62,14 @@ def status_command() -> None:
     table.add_row("Model", model_str)
     table.add_row("Max Tokens", str(defaults.max_tokens))
     table.add_row("Temperature", str(defaults.temperature))
+    # Adaptive thinking
+    effort = getattr(defaults, "sdk_effort", None)
+    show_thinking = getattr(defaults, "sdk_show_thinking", True)
+    if effort:
+        thinking_label = f"adaptive ({effort} effort)" + (" 👁" if show_thinking else "")
+        table.add_row("Thinking", thinking_label)
+    else:
+        table.add_row("Thinking", "disabled")
     table.add_row("Tool Iterations", str(defaults.max_tool_iterations))
     table.add_row("Memory Window", str(defaults.memory_window))
     table.add_row("", "")
