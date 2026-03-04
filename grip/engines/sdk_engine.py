@@ -393,6 +393,7 @@ class SDKRunner(EngineProtocol):
 
         tool_calls_made: list[str] = []
         result_text: str | None = None
+        thinking_parts: list[str] = []
 
         try:
             # ClaudeSDKClient supports custom tools (via @tool / SDK MCP
@@ -405,6 +406,12 @@ class SDKRunner(EngineProtocol):
                         for block in getattr(message, "content", []):
                             if hasattr(block, "name"):
                                 tool_calls_made.append(block.name)
+                            # Capture thinking blocks
+                            block_type = getattr(block, "type", None)
+                            if block_type == "thinking":
+                                thinking_text = getattr(block, "thinking", None)
+                                if thinking_text:
+                                    thinking_parts.append(thinking_text)
                     # ResultMessage is the authoritative final response;
                     # AssistantMessage text blocks duplicate it, so text
                     # is only captured here to avoid printing twice.
@@ -420,7 +427,12 @@ class SDKRunner(EngineProtocol):
                 raise rest from eg
             logger.debug("Suppressed CLIConnectionError during query cleanup: {}", eg)
 
+        # Prepend thinking blocks if present and enabled in config
+        show_thinking = getattr(self._config.agents.defaults, "sdk_show_thinking", True)
         response_text = result_text or ""
+        if thinking_parts and show_thinking:
+            thinking_combined = "\n\n---\n\n".join(thinking_parts)
+            response_text = f"💭 *Thinking...*\n\n{thinking_combined}\n\n──────────\n\n{response_text}"
 
         # Persist user message and agent response to conversation history
         self._memory_mgr.append_history(f"User ({session_key}): {user_message[:200]}")

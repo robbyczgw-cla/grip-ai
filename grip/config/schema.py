@@ -136,6 +136,10 @@ class AgentDefaults(BaseModel):
         description="Adaptive thinking effort level: 'low', 'medium', 'high', or 'max' (opus only). "
         "Enables adaptive thinking via the --effort CLI flag. None = disabled.",
     )
+    sdk_show_thinking: bool = Field(
+        default=True,
+        description="Show Claude's thinking blocks in responses (prefixed with 💭).",
+    )
 
 
 class ModelTiersConfig(BaseModel):
