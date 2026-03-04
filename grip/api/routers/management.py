@@ -26,8 +26,58 @@ from grip.api.dependencies import (
 )
 from grip.config.schema import ChannelsConfig, GripConfig
 from grip.memory.manager import MemoryManager
+from grip.memory.semantic import SemanticMemory
 
 router = APIRouter(prefix="/api/v1", tags=["management"])
+
+
+def _memory_archives_dir() -> Path:
+    return Path.home() / ".grip" / "memory"
+
+
+def _safe_archive_count(directory: Path) -> int:
+    try:
+        if not directory.exists():
+            return 0
+        return len([p for p in directory.iterdir() if p.is_file()])
+    except Exception:
+        return 0
+
+
+def _latest_daily_archive(daily_dir: Path) -> str | None:
+    try:
+        if not daily_dir.exists():
+            return None
+        daily_files = [p for p in daily_dir.iterdir() if p.is_file()]
+        if not daily_files:
+            return None
+        latest = max(daily_files, key=lambda f: f.stat().st_mtime)
+        return latest.stem
+    except Exception:
+        return None
+
+
+def _read_archive_file(archive_type: str, date: str) -> tuple[Path, str]:
+    if archive_type not in {"daily", "monthly"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="type must be daily or monthly")
+
+    cleaned = date.strip()
+    if not cleaned:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="date is required")
+    if "/" in cleaned or ".." in cleaned or "\\" in cleaned:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid date")
+
+    base = _memory_archives_dir() / archive_type
+    target = base / f"{cleaned}.md"
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="archive not found")
+
+    try:
+        content = target.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"failed to read archive: {exc}") from exc
+
+    return target, content
 
 
 # ── Status ──
@@ -339,6 +389,74 @@ async def search_memory(
     return {"query": q, "results": results, "count": len(results)}
 
 
+@router.get(
+    "/memory/archives",
+    dependencies=[Depends(check_rate_limit)],
+)
+async def list_memory_archives(
+    type: str,
+    request: Request,
+    token: str = Depends(require_auth),
+) -> dict:
+    """List daily or monthly memory archive files."""
+    check_token_rate_limit(request, token)
+
+    archive_type = (type or "").strip().lower()
+    if archive_type not in {"daily", "monthly"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="type must be daily or monthly")
+
+    archive_dir = _memory_archives_dir() / archive_type
+    files: list[dict[str, Any]] = []
+    if archive_dir.exists():
+        try:
+            for file_path in sorted(
+                [p for p in archive_dir.iterdir() if p.is_file() and p.suffix.lower() in {".md", ".txt"}],
+                key=lambda p: p.name,
+                reverse=True,
+            ):
+                try:
+                    stat = file_path.stat()
+                    files.append(
+                        {
+                            "name": file_path.name,
+                            "date": file_path.stem,
+                            "size": stat.st_size,
+                            "updated_at": stat.st_mtime,
+                        }
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    return {"type": archive_type, "archives": files, "count": len(files)}
+
+
+@router.get(
+    "/memory/archive",
+    dependencies=[Depends(check_rate_limit)],
+)
+async def get_memory_archive(
+    date: str,
+    request: Request,
+    token: str = Depends(require_auth),
+    type: str = "daily",
+) -> dict:
+    """Get a specific memory archive by date (YYYY-MM-DD for daily, YYYY-MM for monthly)."""
+    check_token_rate_limit(request, token)
+
+    archive_type = (type or "daily").strip().lower()
+    target, content = _read_archive_file(archive_type, date)
+
+    return {
+        "type": archive_type,
+        "date": date,
+        "path": str(target),
+        "content": content,
+        "length": len(content),
+    }
+
+
 # ── Metrics ──
 
 
@@ -594,6 +712,25 @@ async def get_info(
         except Exception:
             pass
 
+    # Semantic memory stats (best-effort only)
+    semantic_memory = {
+        "chroma_entries": 0,
+        "daily_archives": 0,
+        "monthly_archives": 0,
+        "latest_daily": None,
+    }
+    try:
+        semantic_memory["chroma_entries"] = int(SemanticMemory().count())
+    except Exception:
+        pass
+
+    archives_root = _memory_archives_dir()
+    daily_dir = archives_root / "daily"
+    monthly_dir = archives_root / "monthly"
+    semantic_memory["daily_archives"] = _safe_archive_count(daily_dir)
+    semantic_memory["monthly_archives"] = _safe_archive_count(monthly_dir)
+    semantic_memory["latest_daily"] = _latest_daily_archive(daily_dir)
+
     # Channels status
     channels_status = {}
     from grip.config.schema import ChannelsConfig
@@ -626,5 +763,6 @@ async def get_info(
         "session_count": session_count,
         "today_messages": today_messages,
         "last_memory_update": last_memory_update,
+        "semantic_memory": semantic_memory,
         "channels": channels_status,
     }

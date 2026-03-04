@@ -167,3 +167,20 @@ Implemented semantic memory and archive tooling in Grip.
 
 ### Notes
 - Semantic embeddings and LLM summaries require `tools.extra.groq_api_key` (or `GROQ_API_KEY`) in the active runtime config.
+
+## 2026-03-04 — Semantic memory info + archive API endpoints
+
+### API: `/api/v1/info`
+- Added `semantic_memory` block (best-effort, never breaks endpoint):
+  - `chroma_entries` from `SemanticMemory().count()`
+  - `daily_archives` from `~/.grip/memory/daily/`
+  - `monthly_archives` from `~/.grip/memory/monthly/`
+  - `latest_daily` from most recently modified daily archive file
+- Uses safe fallback values when Chroma or filesystem reads are unavailable.
+
+### API: new memory archive endpoints
+- Added `GET /api/v1/memory/archives?type=daily|monthly`
+  - returns archive list with filename/date/size/updated timestamp
+- Added `GET /api/v1/memory/archive?type=daily|monthly&date=YYYY-MM-DD|YYYY-MM`
+  - returns archive content and metadata
+- Includes validation and non-destructive error handling.
