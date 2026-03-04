@@ -422,27 +422,20 @@ class SDKRunner(EngineProtocol):
             extra_args["effort"] = sdk_effort
 
 
-        # Optional SDK native web tools. Keep custom web_search_plus intact as fallback.
-        native_tools: list[str] = []
-        if getattr(self._config.tools, "enable_native_search", False):
-            # Claude Agent SDK built-ins (primary web path)
-            native_tools.extend(["WebSearch", "WebFetch"])
-            # Also allow legacy native name for compatibility on older SDK/runtime versions.
-            native_tools.append("web_search_20250305")
-            for t in native_tools:
-                allowed_tools.append(t)
-        # Pass None to allow all tools (built-in + MCP).
-        # Only restrict if external MCP servers explicitly define allowed tools.
-        grip_tool_names = set(custom_tool_names)
-        external_restrictions = [t for t in allowed_tools if t not in grip_tool_names]
-        final_allowed_tools = allowed_tools if external_restrictions else None
+        # Do not restrict built-in SDK tools; keep all native tools available.
+        # This includes: Read, Write, Edit, Bash, Glob, Grep, WebSearch, WebFetch, AskUserQuestion.
+        native_tools: list[str] | None = None
+        # Allow all SDK built-ins + MCP tools by default (no unnecessary restriction).
+        # This keeps native tools (Read/Write/Edit/Bash/Glob/Grep/WebSearch/WebFetch/AskUserQuestion)
+        # available while still exposing custom grip MCP tools.
+        final_allowed_tools = None
 
         options = ClaudeAgentOptions(
             model=effective_model,
             system_prompt=system_prompt,
             mcp_servers=mcp_servers,
             permission_mode=self._permission_mode,
-            tools=native_tools or None,
+            tools=native_tools,
             cwd=self._cwd,
             allowed_tools=final_allowed_tools,
             env=env_opts if env_opts else None,
