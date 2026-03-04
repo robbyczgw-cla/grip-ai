@@ -113,3 +113,11 @@ Added 3 new SDK-native tools in `grip/engines/sdk_engine.py` (registered with `@
 Also updated `/root/.grip/config.json` to include `tools.extra.apify_api_token` and created cache directories:
 - `~/.grip/cache/youtube/`
 - `~/.grip/cache/twitter/`
+
+### Telegram TTS behavior tweak (2026-03-04 late)
+- Adjusted   flow so text replies are always sent first.
+- If , the bot now sends ElevenLabs voice **in addition to** text (instead of replacing text).
+
+### Telegram TTS behavior tweak (2026-03-04 late)
+- Adjusted `grip/channels/telegram.py` `send()` flow so text replies are always sent first.
+- If `tools.extra.tts_enabled=true`, the bot now sends ElevenLabs voice **in addition to** text (instead of replacing text).

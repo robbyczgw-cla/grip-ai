@@ -757,10 +757,6 @@ class TelegramChannel(BaseChannel):
             logger.error("Telegram: cannot send, bot not initialized")
             return
 
-        # Optional voice response via ElevenLabs TTS
-        if await self._send_tts_voice(chat_id, text):
-            return
-
         html_text = _markdown_to_telegram_html(text)
         chunks = self.split_message(html_text, TELEGRAM_MAX_MESSAGE_LENGTH)
         for chunk in chunks:
@@ -782,6 +778,9 @@ class TelegramChannel(BaseChannel):
                     )
                 except Exception as fallback_exc:
                     logger.error("Telegram send failed completely: {}", fallback_exc)
+
+        # Optional voice response via ElevenLabs TTS (in addition to text)
+        await self._send_tts_voice(chat_id, text)
 
     async def send_file(self, chat_id: str, file_path: str, caption: str = "") -> None:
         """Send a file to Telegram as a photo (images) or document (everything else).
