@@ -302,6 +302,48 @@ class SDKRunner(EngineProtocol):
 
         tools.extend([send_message, send_file, remember, recall])
 
+        # Web search tool
+        runner_ref = runner
+
+        @tool(
+            "web_search",
+            "Search the web for information. Returns titles, URLs, and snippets.",
+            {"query": str, "max_results": int},
+        )
+        async def web_search(args: dict[str, Any]) -> dict[str, Any]:
+            import httpx
+            import os
+            query = args["query"]
+            max_results = min(args.get("max_results", 5), 10)
+
+            # Try Serper (Google)
+            serper_key = os.environ.get("SERPER_API_KEY", "")
+            cfg_extra = getattr(runner_ref._config, "tools", None)
+            if cfg_extra and hasattr(cfg_extra, "extra"):
+                serper_key = cfg_extra.extra.get("serper_api_key", serper_key)
+
+            if serper_key:
+                try:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        resp = await client.post(
+                            "https://google.serper.dev/search",
+                            json={"q": query, "num": max_results},
+                            headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
+                        results = []
+                        for item in data.get("organic", [])[:max_results]:
+                            results.append(f"**{item.get('title','')}**\n{item.get('link','')}\n{item.get('snippet','')}")
+                        if results:
+                            return runner_ref._text_result("\n\n".join(results))
+                except Exception:
+                    pass
+
+            return runner_ref._text_result("Web search unavailable.")
+
+        tools.append(web_search)
+
         try:
             import yfinance  # noqa: F401
 
