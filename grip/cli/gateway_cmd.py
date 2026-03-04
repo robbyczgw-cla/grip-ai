@@ -278,10 +278,13 @@ async def _consume_inbound(
             mem_lines = len(mem.strip().splitlines()) if mem.strip() else 0
             trusted = trust_mgr.trusted_directories
             trust_line = ", ".join(trusted) if trusted else "none"
+            effort = getattr(config.agents.defaults, "sdk_effort", None)
+            thinking_str = f"adaptive ({effort} effort)" if effort else "disabled"
             status_text = (
                 f"Session: {session_key}\n"
                 f"Messages: {session.message_count}\n"
                 f"Model: {model}\n"
+                f"Thinking: {thinking_str}\n"
                 f"Memory facts: ~{mem_lines} lines\n"
                 f"Trusted dirs: {trust_line}"
             )
