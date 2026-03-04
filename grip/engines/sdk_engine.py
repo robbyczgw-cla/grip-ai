@@ -422,13 +422,20 @@ class SDKRunner(EngineProtocol):
         if sdk_effort:
             extra_args["effort"] = sdk_effort
 
+        # Only restrict tools when external MCP servers define specific allowed tools.
+        # If allowed_tools only contains grip's own MCP tools, pass None to allow
+        # all Claude built-in tools (Bash, WebFetch, WebSearch, Read, etc.)
+        grip_tool_names = set(custom_tool_names)
+        external_restrictions = [t for t in allowed_tools if t not in grip_tool_names]
+        final_allowed_tools = allowed_tools if external_restrictions else None
+
         options = ClaudeAgentOptions(
             model=effective_model,
             system_prompt=system_prompt,
             mcp_servers=mcp_servers,
             permission_mode=self._permission_mode,
             cwd=self._cwd,
-            allowed_tools=allowed_tools if allowed_tools else None,
+            allowed_tools=final_allowed_tools,
             env=env_opts if env_opts else None,
             extra_args=extra_args if extra_args else {},
         )
