@@ -18,6 +18,7 @@ from grip.tools.shell import create_shell_tools
 from grip.tools.spawn import SubagentManager, create_spawn_tools
 from grip.tools.todo import create_todo_tools
 from grip.tools.web import create_web_tools
+from grip.tools.web_search_plus import search_web_plus
 from grip.tools.workflow import create_workflow_tools
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "create_todo_tools",
     "create_web_tools",
     "create_workflow_tools",
+    "search_web_plus",
 ]
 
 

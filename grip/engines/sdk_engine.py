@@ -302,44 +302,37 @@ class SDKRunner(EngineProtocol):
 
         tools.extend([send_message, send_file, remember, recall])
 
-        # Web search tool
+        # Web search plus tool (native module-backed multi-provider routing)
         runner_ref = runner
 
         @tool(
             "web_search",
-            "Search the web for information. Returns titles, URLs, and snippets.",
+            "Search the web with smart provider routing (Serper, Tavily, Perplexity, Exa). Returns titles, URLs, and snippets.",
             {"query": str, "max_results": int},
         )
         async def web_search(args: dict[str, Any]) -> dict[str, Any]:
-            import httpx
-            import os
-            query = args["query"]
-            max_results = min(args.get("max_results", 5), 10)
+            from grip.tools.web_search_plus import search_web_plus
 
-            # Try Serper (Google)
-            serper_key = os.environ.get("SERPER_API_KEY", "")
-            cfg_extra = getattr(runner_ref._config, "tools", None)
-            if cfg_extra and hasattr(cfg_extra, "extra"):
-                serper_key = cfg_extra.extra.get("serper_api_key", serper_key)
+            query = (args.get("query") or "").strip()
+            if not query:
+                return runner_ref._text_result("Missing query.")
+            max_results = min(max(int(args.get("max_results", 5)), 1), 10)
 
-            if serper_key:
-                try:
-                    async with httpx.AsyncClient(timeout=10) as client:
-                        resp = await client.post(
-                            "https://google.serper.dev/search",
-                            json={"q": query, "num": max_results},
-                            headers={"X-API-KEY": serper_key, "Content-Type": "application/json"},
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
-                        results = []
-                        for item in data.get("organic", [])[:max_results]:
-                            results.append(f"**{item.get('title','')}**\n{item.get('link','')}\n{item.get('snippet','')}")
-                        if results:
-                            return runner_ref._text_result("\n\n".join(results))
-                except Exception:
-                    pass
+            cfg_tools = getattr(runner_ref._config, "tools", None)
+            cfg_extra = getattr(cfg_tools, "extra", {}) if cfg_tools else {}
 
+            provider, rendered, errors = await search_web_plus(
+                query,
+                max_results=max_results,
+                extra=cfg_extra if isinstance(cfg_extra, dict) else {},
+            )
+            if rendered:
+                return runner_ref._text_result(rendered)
+
+            if errors:
+                return runner_ref._text_result(
+                    "Web search unavailable. Tried providers with errors: " + ", ".join(errors)
+                )
             return runner_ref._text_result("Web search unavailable.")
 
         tools.append(web_search)
@@ -429,13 +422,15 @@ class SDKRunner(EngineProtocol):
             extra_args["effort"] = sdk_effort
 
 
-        # Optional Anthropic native web search tool (Messages API tool type).
-        # Keep custom web_search (Brave/DDG/Serper) intact; this adds a native option.
+        # Optional SDK native web tools. Keep custom web_search_plus intact as fallback.
         native_tools: list[str] = []
         if getattr(self._config.tools, "enable_native_search", False):
+            # Claude Agent SDK built-ins (primary web path)
+            native_tools.extend(["WebSearch", "WebFetch"])
+            # Also allow legacy native name for compatibility on older SDK/runtime versions.
             native_tools.append("web_search_20250305")
-            # When allowed_tools restrictions are active, explicitly allow native tool.
-            allowed_tools.append("web_search_20250305")
+            for t in native_tools:
+                allowed_tools.append(t)
         # Pass None to allow all tools (built-in + MCP).
         # Only restrict if external MCP servers explicitly define allowed tools.
         grip_tool_names = set(custom_tool_names)
