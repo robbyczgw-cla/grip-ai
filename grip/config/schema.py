@@ -324,6 +324,10 @@ class ToolsConfig(BaseModel):
         description="MCP tool search behavior: 'auto' (activate when tools exceed 10%% of context), "
         "'auto:N' (custom threshold), 'true' (always), 'false' (disabled).",
     )
+    enable_native_search: bool = Field(
+        default=False,
+        description="Enable Anthropic native web search tool (web_search_20250305) in Claude SDK runs.",
+    )
 
 
 class HeartbeatConfig(BaseModel):

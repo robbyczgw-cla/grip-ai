@@ -429,6 +429,13 @@ class SDKRunner(EngineProtocol):
             extra_args["effort"] = sdk_effort
 
 
+        # Optional Anthropic native web search tool (Messages API tool type).
+        # Keep custom web_search (Brave/DDG/Serper) intact; this adds a native option.
+        native_tools: list[str] = []
+        if getattr(self._config.tools, "enable_native_search", False):
+            native_tools.append("web_search_20250305")
+            # When allowed_tools restrictions are active, explicitly allow native tool.
+            allowed_tools.append("web_search_20250305")
         # Pass None to allow all tools (built-in + MCP).
         # Only restrict if external MCP servers explicitly define allowed tools.
         grip_tool_names = set(custom_tool_names)
@@ -440,6 +447,7 @@ class SDKRunner(EngineProtocol):
             system_prompt=system_prompt,
             mcp_servers=mcp_servers,
             permission_mode=self._permission_mode,
+            tools=native_tools or None,
             cwd=self._cwd,
             allowed_tools=final_allowed_tools,
             env=env_opts if env_opts else None,
