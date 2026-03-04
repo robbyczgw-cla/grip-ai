@@ -257,6 +257,22 @@ class SDKRunner(EngineProtocol):
         memory_mgr = self._memory_mgr
         runner = self
 
+        cfg_tools = getattr(runner._config, "tools", None)
+        cfg_extra = getattr(cfg_tools, "extra", {}) if cfg_tools else {}
+        groq_api_key = (
+            cfg_extra.get("groq_api_key", "") if isinstance(cfg_extra, dict) else ""
+        ) or os.environ.get("GROQ_API_KEY", "")
+        groq_api_key = groq_api_key.strip()
+
+        semantic_memory = None
+        if groq_api_key:
+            try:
+                from grip.memory.semantic import SemanticMemory
+
+                semantic_memory = SemanticMemory(groq_api_key=groq_api_key)
+            except Exception as exc:
+                logger.warning("Semantic memory unavailable at startup: {}", exc)
+
         @tool(
             "send_message",
             "Send a text message to the user via the configured channel.",
@@ -295,6 +311,17 @@ class SDKRunner(EngineProtocol):
         async def remember(args: dict[str, Any]) -> dict[str, Any]:
             entry = f"- [{args['category']}] {args['fact']}"
             memory_mgr.append_to_memory(entry)
+
+            # Best-effort semantic indexing; never break regular memory writes.
+            if semantic_memory is not None:
+                try:
+                    semantic_memory.add(
+                        text=args["fact"],
+                        metadata={"category": args["category"], "source": "remember_tool"},
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to index semantic memory: {}", exc)
+
             return runner._text_result(f"Stored fact under category '{args['category']}'.")
 
         @tool(
@@ -308,7 +335,131 @@ class SDKRunner(EngineProtocol):
                 return runner._text_result("No matching facts found in memory.")
             return runner._text_result("\n".join(results))
 
-        tools.extend([send_message, send_file, remember, recall])
+        @tool(
+            "semantic_recall",
+            "Search semantically similar long-term memories. Falls back to keyword recall when unavailable.",
+            {"query": str, "top_k": int},
+        )
+        async def semantic_recall(args: dict[str, Any]) -> dict[str, Any]:
+            query = (args.get("query") or "").strip()
+            if not query:
+                return runner._text_result("Missing query.")
+            try:
+                top_k = max(1, min(int(args.get("top_k", 5)), 20))
+            except Exception:
+                top_k = 5
+
+            if semantic_memory is None:
+                fallback = memory_mgr.search_memory(query, max_results=top_k)
+                if not fallback:
+                    return runner._text_result("No matching facts found in memory.")
+                return runner._text_result("[fallback: keyword recall]\n" + "\n".join(fallback))
+
+            try:
+                hits = semantic_memory.search(query=query, top_k=top_k)
+                if not hits:
+                    return runner._text_result("No semantically similar memories found.")
+                lines = []
+                for i, h in enumerate(hits, 1):
+                    meta = h.get("metadata") or {}
+                    cat = meta.get("category", "unknown")
+                    dist = h.get("distance")
+                    dist_txt = f"{float(dist):.4f}" if isinstance(dist, (float, int)) else "n/a"
+                    lines.append(f"{i}. [{cat}] {h.get('text', '')} (distance: {dist_txt})")
+                return runner._text_result("\n".join(lines))
+            except Exception as exc:
+                logger.warning("semantic_recall failed, using fallback: {}", exc)
+                fallback = memory_mgr.search_memory(query, max_results=top_k)
+                if not fallback:
+                    return runner._text_result("No matching facts found in memory.")
+                return runner._text_result("[fallback: keyword recall]\n" + "\n".join(fallback))
+
+        @tool(
+            "summarize_today",
+            "Create and save today's daily memory archive.",
+            {},
+        )
+        async def summarize_today(args: dict[str, Any]) -> dict[str, Any]:
+            if not groq_api_key:
+                return runner._text_result("Missing groq_api_key in tools.extra.groq_api_key")
+            try:
+                from grip.memory.archiver import create_daily_summary, today_iso
+
+                day = today_iso()
+                out_path = await asyncio.to_thread(create_daily_summary, day, groq_api_key)
+                return runner._text_result(f"Daily archive created: {out_path}")
+            except Exception as exc:
+                return runner._text_result(f"Failed to create daily archive: {exc}")
+
+        @tool(
+            "summarize_month",
+            "Create and save a monthly memory digest.",
+            {"year": int, "month": int},
+        )
+        async def summarize_month(args: dict[str, Any]) -> dict[str, Any]:
+            if not groq_api_key:
+                return runner._text_result("Missing groq_api_key in tools.extra.groq_api_key")
+            try:
+                from grip.memory.archiver import create_monthly_summary, previous_month
+
+                year = args.get("year")
+                month = args.get("month")
+                if year is None or month is None:
+                    year, month = previous_month()
+                out_path = await asyncio.to_thread(create_monthly_summary, int(year), int(month), groq_api_key)
+                return runner._text_result(f"Monthly archive created: {out_path}")
+            except Exception as exc:
+                return runner._text_result(f"Failed to create monthly archive: {exc}")
+
+        @tool(
+            "list_memory_archives",
+            "List available daily and monthly memory archives.",
+            {},
+        )
+        async def list_memory_archives(args: dict[str, Any]) -> dict[str, Any]:
+            try:
+                from grip.memory.archiver import list_archives
+
+                archives = await asyncio.to_thread(list_archives)
+                daily = archives.get("daily", [])
+                monthly = archives.get("monthly", [])
+                return runner._text_result(
+                    "Daily archives:\n"
+                    + ("\n".join(daily) if daily else "(none)")
+                    + "\n\nMonthly archives:\n"
+                    + ("\n".join(monthly) if monthly else "(none)")
+                )
+            except Exception as exc:
+                return runner._text_result(f"Failed to list archives: {exc}")
+
+        @tool(
+            "read_memory_archive",
+            "Read a memory archive by date (YYYY-MM-DD daily or YYYY-MM monthly).",
+            {"date": str},
+        )
+        async def read_memory_archive(args: dict[str, Any]) -> dict[str, Any]:
+            ident = (args.get("date") or "").strip()
+            if not ident:
+                return runner._text_result("Missing date.")
+            try:
+                from grip.memory.archiver import read_archive
+
+                text = await asyncio.to_thread(read_archive, ident)
+                return runner._text_result(text)
+            except Exception as exc:
+                return runner._text_result(f"Failed to read archive: {exc}")
+
+        tools.extend([
+            send_message,
+            send_file,
+            remember,
+            recall,
+            semantic_recall,
+            summarize_today,
+            summarize_month,
+            list_memory_archives,
+            read_memory_archive,
+        ])
 
         # Web search plus tool (native module-backed multi-provider routing)
         runner_ref = runner

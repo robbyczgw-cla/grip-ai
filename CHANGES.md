@@ -121,3 +121,49 @@ Also updated `/root/.grip/config.json` to include `tools.extra.apify_api_token` 
 ### Telegram TTS behavior tweak (2026-03-04 late)
 - Adjusted `grip/channels/telegram.py` `send()` flow so text replies are always sent first.
 - If `tools.extra.tts_enabled=true`, the bot now sends ElevenLabs voice **in addition to** text (instead of replacing text).
+
+## 🧠 Semantic Memory + Archive Crons (2026-03-04)
+
+Implemented semantic memory and archive tooling in Grip.
+
+### New modules
+- `grip/memory/semantic.py`
+  - `get_embedding(text, groq_api_key)` via `POST https://api.groq.com/openai/v1/embeddings`
+  - model: `nomic-embed-text-v1_5`
+  - `SemanticMemory` with ChromaDB persistent store at `~/.grip/memory/chroma/`
+  - collection: `grip_memory`
+  - methods: `add(text, metadata)`, `search(query, top_k=5)`, `count()`
+
+- `grip/memory/archiver.py`
+  - `create_daily_summary(date, groq_api_key)` → saves `~/.grip/memory/daily/YYYY-MM-DD.md`
+  - `create_monthly_summary(year, month, groq_api_key)` → saves `~/.grip/memory/monthly/YYYY-MM.md`
+  - helpers for listing/reading archives and previous-month calculation
+
+### SDK tool updates (`grip/engines/sdk_engine.py`)
+- `remember` now does best-effort semantic indexing after regular memory append
+  - non-breaking behavior preserved if Chroma/Groq fails
+- Added `semantic_recall(query, top_k=5)`
+  - uses `SemanticMemory.search()`
+  - fallback to keyword `recall` behavior if semantic backend unavailable
+- Added archive tools:
+  - `summarize_today()`
+  - `summarize_month(year, month)`
+  - `list_memory_archives()`
+  - `read_memory_archive(date)`
+
+### Infra changes
+- Installed: `chromadb` (system python)
+- Created memory dirs:
+  - `~/.grip/memory/chroma/`
+  - `~/.grip/memory/daily/`
+  - `~/.grip/memory/monthly/`
+
+### Cron jobs registered via API
+- `daily-memory-archive` → `0 23 * * *`
+- `monthly-memory-digest` → `0 10 1 * *`
+
+### Service
+- Restarted `grip` via systemd and verified active.
+
+### Notes
+- Semantic embeddings and LLM summaries require `tools.extra.groq_api_key` (or `GROQ_API_KEY`) in the active runtime config.
