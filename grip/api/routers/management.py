@@ -428,3 +428,203 @@ def _get_workflow_store(request: Request):
     from grip.workflow.store import WorkflowStore
 
     return WorkflowStore(workspace.root / "workflows")
+# ── Info (comprehensive dashboard data) ──
+
+
+@router.get(
+    "/info",
+    dependencies=[Depends(check_rate_limit)],
+)
+async def get_info(
+    request: Request,
+    token: str = Depends(require_auth),
+    config: GripConfig = Depends(get_config),  # noqa: B008
+    memory_mgr: MemoryManager = Depends(get_memory_mgr),  # noqa: B008
+) -> dict:
+    """Comprehensive system info for /info command and dashboard."""
+    import time
+
+    check_token_rate_limit(request, token)
+
+    defaults = config.agents.defaults
+    ws_path = defaults.workspace.expanduser().resolve()
+
+    # Model + effort
+    model = defaults.model
+    effort = getattr(defaults, "sdk_effort", "default")
+
+    # Uptime + version
+    from grip import __version__
+    start_time: float = request.app.state.start_time
+    uptime_seconds = time.time() - start_time
+
+    # Memory info
+    memory_content = await asyncio.to_thread(memory_mgr.read_memory)
+    memory_size = len(memory_content.encode("utf-8"))
+
+    # History count
+    history_path = ws_path / "memory" / "HISTORY.md"
+    history_count = 0
+    if history_path.exists():
+        try:
+            history_text = history_path.read_text()
+            history_count = history_text.count("\n## ")
+            if history_count == 0:
+                history_count = len([l for l in history_text.splitlines() if l.strip()])
+        except Exception:
+            pass
+
+    # Cron jobs
+    cron_svc = getattr(request.app.state, "cron_service", None)
+    cron_jobs = []
+    if cron_svc:
+        jobs = cron_svc.list_jobs()
+        cron_jobs = [j.to_dict() for j in jobs]
+
+    # Tools/Skills
+    tool_definitions = []
+    try:
+        registry = getattr(request.app.state, "tool_registry", None)
+        if registry:
+            tool_definitions = registry.get_definitions()
+    except Exception:
+        pass
+
+    # Skills (always available via skills_loader)
+    skill_list = []
+    _sl = getattr(request.app.state, "skills_loader", None)
+    if _sl:
+        _skills = _sl.list_skills()
+        skill_list = [{"name": s.name, "description": s.description} for s in _skills]
+
+    # API key status - read directly from config file since Pydantic ignores tools.extra
+    extra = {}
+    try:
+        import json as _json
+        _cfg_path = Path.home() / ".grip" / "config.json"
+        if _cfg_path.exists():
+            _raw_cfg = _json.loads(_cfg_path.read_text())
+            extra = _raw_cfg.get("tools", {}).get("extra", {})
+    except Exception:
+        pass
+
+    api_keys = {}
+    key_checks = {
+        "elevenlabs": "elevenlabs_api_key",
+        "groq": "groq_api_key",
+        "apify": "apify_api_token",
+        "serper": "serper_api_key",
+        "tavily": "tavily_api_key",
+    }
+    for name, key_name in key_checks.items():
+        val = extra.get(key_name, "")
+        api_keys[name] = bool(val and str(val).strip())
+
+    # Cache stats
+    cache_stats = {"youtube": 0, "twitter": 0}
+    cache_dir = ws_path / "cache"
+    if cache_dir.exists():
+        try:
+            yt_cache = list(cache_dir.glob("youtube_*")) + list(cache_dir.glob("yt_*"))
+            tw_cache = list(cache_dir.glob("twitter_*")) + list(cache_dir.glob("tw_*")) + list(cache_dir.glob("x_*"))
+            cache_stats["youtube"] = len(yt_cache)
+            cache_stats["twitter"] = len(tw_cache)
+        except Exception:
+            pass
+    # Also check state directory for caches
+    state_dir = ws_path / "state"
+    if state_dir.exists():
+        try:
+            for f in state_dir.iterdir():
+                fname = f.name.lower()
+                if "youtube" in fname or "yt_cache" in fname:
+                    try:
+                        import json as _json
+                        data = _json.loads(f.read_text())
+                        if isinstance(data, dict):
+                            cache_stats["youtube"] += len(data)
+                    except Exception:
+                        cache_stats["youtube"] += 1
+                if "twitter" in fname or "x_cache" in fname:
+                    try:
+                        import json as _json
+                        data = _json.loads(f.read_text())
+                        if isinstance(data, dict):
+                            cache_stats["twitter"] += len(data)
+                    except Exception:
+                        cache_stats["twitter"] += 1
+        except Exception:
+            pass
+
+    # Session/message stats
+    sessions_dir = ws_path / "sessions"
+    session_count = 0
+    today_messages = 0
+    if sessions_dir.exists():
+        import datetime
+        today_str = datetime.date.today().isoformat()
+        try:
+            session_files = list(sessions_dir.glob("*.json"))
+            session_count = len(session_files)
+            for sf in session_files:
+                try:
+                    stat = sf.stat()
+                    mod_date = datetime.date.fromtimestamp(stat.st_mtime).isoformat()
+                    if mod_date == today_str:
+                        import json as _json
+                        data = _json.loads(sf.read_text())
+                        msgs = data.get("messages", [])
+                        today_messages += len(msgs)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Last memory update
+    last_memory_update = None
+    mem_path = ws_path / "memory" / "MEMORY.md"
+    if not mem_path.exists():
+        mem_path = ws_path / "MEMORY.md"
+    if mem_path.exists():
+        try:
+            import datetime
+            last_memory_update = datetime.datetime.fromtimestamp(
+                mem_path.stat().st_mtime
+            ).isoformat()
+        except Exception:
+            pass
+
+    # Channels status
+    channels_status = {}
+    from grip.config.schema import ChannelsConfig
+    for name in ChannelsConfig.CHANNEL_NAMES:
+        ch = getattr(config.channels, name, None)
+        if ch and ch.is_active():
+            channels_status[name] = "active"
+        elif ch and ch.enabled:
+            channels_status[name] = "no_token"
+        else:
+            channels_status[name] = "disabled"
+
+    return {
+        "model": model,
+        "effort": effort,
+        "version": __version__,
+        "uptime_seconds": round(uptime_seconds, 1),
+        "memory_size_bytes": memory_size,
+        "history_entry_count": history_count,
+        "cron_jobs": cron_jobs,
+        "cron_count": len(cron_jobs),
+        "tools": ([
+            {"name": t.get("name", t.get("function", {}).get("name", "unknown")),
+             "description": t.get("description", t.get("function", {}).get("description", ""))}
+            for t in tool_definitions
+        ] if tool_definitions else skill_list),
+        "tool_count": len(tool_definitions) if tool_definitions else len(skill_list),
+        "api_keys": api_keys,
+        "cache_stats": cache_stats,
+        "session_count": session_count,
+        "today_messages": today_messages,
+        "last_memory_update": last_memory_update,
+        "channels": channels_status,
+    }

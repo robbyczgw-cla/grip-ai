@@ -20,9 +20,16 @@ Photo captions and document captions are also processed.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import functools
 import html
+import json
 import re
+import tempfile
+from pathlib import Path
+
+import requests
 
 from loguru import logger
 
@@ -32,6 +39,32 @@ from grip.channels.base import BaseChannel
 from grip.config.schema import ChannelEntry
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
+ELEVENLABS_TTS_VOICE_ID = "cgSgspJ2msm6clMCkdW9"  # Jessica
+ELEVENLABS_TTS_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_TTS_VOICE_ID}"
+
+
+@functools.lru_cache(maxsize=1)
+def _load_tools_extra_config() -> dict:
+    """Load tools.extra from ~/.grip/config.json."""
+    cfg_path = Path("/root/.grip/config.json")
+    try:
+        data = json.loads(cfg_path.read_text())
+        return data.get("tools", {}).get("extra", {}) or {}
+    except Exception as exc:
+        logger.debug("Telegram: failed to read {}: {}", cfg_path, exc)
+        return {}
+
+
+def _get_elevenlabs_api_key() -> str:
+    return str(_load_tools_extra_config().get("elevenlabs_api_key", "") or "").strip()
+
+
+def _is_tts_enabled() -> bool:
+    value = _load_tools_extra_config().get("tts_enabled", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _parse_chat_id(chat_id: str) -> int | str:
@@ -65,6 +98,7 @@ _MD_TO_HTML_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 _BOT_COMMANDS = [
     ("start", "Welcome message"),
     ("help", "List available commands"),
+    ("info", "System status dashboard"),
     ("new", "Start a fresh conversation"),
     ("status", "Show session info"),
     ("model", "Show or switch AI model"),
@@ -194,6 +228,195 @@ class TelegramChannel(BaseChannel):
                 _build_help_text(),
                 parse_mode="HTML",
             )
+
+
+
+        async def _build_info_text() -> str:
+            """Build rich HTML text for /info command by calling Grip API."""
+            import time as _time
+
+            lines = ["<b>📊 Grip System Info</b>\n"]
+
+            # Fetch from Grip API
+            grip_api = "http://localhost:18800"
+            grip_token = "grip_ExfDdyXyXVB1NC7zrTx5H-v9gZS6DP3lAIc3yv8CGwY"
+            headers = {"Authorization": f"Bearer {grip_token}"}
+
+            info_data = {}
+            health_data = {}
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    # Fetch info endpoint
+                    async with session.get(f"{grip_api}/api/v1/info", headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            info_data = await resp.json()
+                    # Fetch health for uptime
+                    async with session.get(f"{grip_api}/api/v1/health", headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        if resp.status == 200:
+                            health_data = await resp.json()
+            except ImportError:
+                # Fallback to requests in thread
+                import asyncio as _aio
+                def _fetch_info():
+                    try:
+                        r1 = requests.get(f"{grip_api}/api/v1/info", headers=headers, timeout=10)
+                        if r1.ok:
+                            return r1.json(), {}
+                    except Exception:
+                        pass
+                    return {}, {}
+                info_data, _ = await _aio.to_thread(_fetch_info)
+                def _fetch_health():
+                    try:
+                        r = requests.get(f"{grip_api}/api/v1/health", headers=headers, timeout=5)
+                        if r.ok:
+                            return r.json()
+                    except Exception:
+                        pass
+                    return {}
+                health_data = await _aio.to_thread(_fetch_health)
+            except Exception as exc:
+                logger.warning("Failed to fetch info from Grip API: {}", exc)
+                return "<b>📊 Grip System Info</b>\n\n❌ Failed to fetch system data."
+
+            # 🤖 Model + effort
+            model = info_data.get("model", "unknown")
+            effort = info_data.get("effort", "default")
+            lines.append(f"🤖 <b>Model:</b> <code>{_escape_html(model)}</code> (effort: {_escape_html(str(effort))})")
+
+            # ⏱️ Uptime + version
+            version = info_data.get("version", health_data.get("version", "?"))
+            uptime_s = info_data.get("uptime_seconds", health_data.get("uptime_seconds", 0))
+            uptime_str = _format_uptime(uptime_s)
+            lines.append(f"⏱️ <b>Uptime:</b> {uptime_str} · v{_escape_html(str(version))}")
+
+            # 🧠 Memory
+            mem_bytes = info_data.get("memory_size_bytes", 0)
+            mem_kb = mem_bytes / 1024
+            history_count = info_data.get("history_entry_count", 0)
+            lines.append(f"🧠 <b>Memory:</b> {mem_kb:.1f} KB · {history_count} history entries")
+
+            # ⏰ Crons
+            cron_count = info_data.get("cron_count", 0)
+            cron_jobs = info_data.get("cron_jobs", [])
+            if cron_count > 0:
+                next_runs = []
+                for j in cron_jobs:
+                    state = j.get("state", {})
+                    nr = state.get("next_run_at_ms") or state.get("nextRunAtMs")
+                    if nr:
+                        next_runs.append(nr)
+                if next_runs:
+                    import datetime
+                    nearest = min(next_runs)
+                    nearest_dt = datetime.datetime.fromtimestamp(nearest / 1000)
+                    lines.append(f"⏰ <b>Crons:</b> {cron_count} active · next: {nearest_dt.strftime('%H:%M')}")
+                else:
+                    lines.append(f"⏰ <b>Crons:</b> {cron_count} active")
+            else:
+                lines.append("⏰ <b>Crons:</b> none")
+
+            # 🔧 Tools
+            tools = info_data.get("tools", [])
+            tool_count = info_data.get("tool_count", len(tools))
+            if tools:
+                tool_names = [t.get("name", "?") for t in tools[:15]]
+                tool_list = ", ".join(f"<code>{_escape_html(n)}</code>" for n in tool_names)
+                if tool_count > 15:
+                    tool_list += f" +{tool_count - 15} more"
+                lines.append(f"🔧 <b>Tools ({tool_count}):</b> {tool_list}")
+            else:
+                lines.append(f"🔧 <b>Tools:</b> {tool_count} loaded")
+
+            # 🔑 API Keys
+            api_keys = info_data.get("api_keys", {})
+            key_line_parts = []
+            for name in ["elevenlabs", "groq", "apify", "serper", "tavily"]:
+                status = "✅" if api_keys.get(name) else "❌"
+                key_line_parts.append(f"{name.title()} {status}")
+            lines.append(f"🔑 <b>API Keys:</b> {' · '.join(key_line_parts)}")
+
+            # 💾 Cache
+            cache = info_data.get("cache_stats", {})
+            yt_count = cache.get("youtube", 0)
+            tw_count = cache.get("twitter", 0)
+            lines.append(f"💾 <b>Cache:</b> YouTube: {yt_count} · Twitter: {tw_count}")
+
+            # 🌤️ Weather (Graz)
+            try:
+                import asyncio as _aio
+                def _fetch_weather():
+                    try:
+                        r = requests.get("https://wttr.in/Graz?format=%c+%t+%h+%w", timeout=5,
+                                         headers={"User-Agent": "curl/7.68.0"})
+                        if r.ok:
+                            return r.text.strip()
+                    except Exception:
+                        pass
+                    return None
+                weather = await _aio.to_thread(_fetch_weather)
+                if weather:
+                    lines.append(f"🌤️ <b>Weather (Graz):</b> {_escape_html(weather)}")
+            except Exception:
+                pass
+
+            # 📊 Today
+            today_msgs = info_data.get("today_messages", 0)
+            last_mem = info_data.get("last_memory_update", "unknown")
+            if last_mem and last_mem != "unknown":
+                try:
+                    import datetime
+                    dt = datetime.datetime.fromisoformat(last_mem)
+                    last_mem = dt.strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    pass
+            lines.append(f"📊 <b>Today:</b> {today_msgs} messages · last memory update: {last_mem}")
+
+            return "\n".join(lines)
+
+        def _format_uptime(seconds: float) -> str:
+            """Format seconds into human-readable uptime string."""
+            s = int(seconds)
+            days = s // 86400
+            hours = (s % 86400) // 3600
+            minutes = (s % 3600) // 60
+            parts = []
+            if days > 0:
+                parts.append(f"{days}d")
+            if hours > 0:
+                parts.append(f"{hours}h")
+            parts.append(f"{minutes}m")
+            return " ".join(parts)
+
+        # ── /info — rich system status dashboard ──
+        async def cmd_info(update: Update, _ctx) -> None:
+            if not update.effective_chat:
+                return
+            ids = _check_user(update)
+            if ids is None:
+                return
+
+            # Show typing while we fetch data
+            if update.effective_chat:
+                with contextlib.suppress(Exception):
+                    await update.effective_chat.send_action(ChatAction.TYPING)
+
+            info_text = await _build_info_text()
+            # Split if needed (Telegram max 4096)
+            chunks = channel_ref.split_message(info_text, TELEGRAM_MAX_MESSAGE_LENGTH)
+            for chunk in chunks:
+                try:
+                    await update.effective_chat.send_message(
+                        chunk,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    # Fallback plain text
+                    import re as _re
+                    plain = _re.sub(r"<[^>]+>", "", chunk)
+                    await update.effective_chat.send_message(plain)
 
         # ── /new — route through bus ──
         async def cmd_new(update: Update, _ctx) -> None:
@@ -409,22 +632,64 @@ class TelegramChannel(BaseChannel):
 
         # ── Voice messages ──
         async def on_voice(update: Update, _ctx) -> None:
-            if not update.message:
+            if not update.message or not update.message.voice:
                 return
             ids = _check_user(update)
             if ids is None:
                 return
-            duration = update.message.voice.duration if update.message.voice else 0
+
+            duration = update.message.voice.duration or 0
+            message_id = str(update.message.message_id)
+
+            if update.effective_chat:
+                with contextlib.suppress(Exception):
+                    await update.effective_chat.send_action(ChatAction.TYPING)
+
+            api_key = _get_elevenlabs_api_key()
+            if not api_key:
+                logger.warning("Telegram: voice received but tools.extra.elevenlabs_api_key is missing")
+                await update.effective_chat.send_message(
+                    "I got your voice message, but transcription is not configured yet. "
+                    "Please add `tools.extra.elevenlabs_api_key` in config.",
+                )
+                return
+
+            try:
+                tg_file = await self._app.bot.get_file(update.message.voice.file_id)
+                with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+                try:
+                    await tg_file.download_to_drive(str(tmp_path))
+                    transcript = await asyncio.to_thread(
+                        self._transcribe_with_elevenlabs,
+                        tmp_path,
+                        api_key,
+                    )
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("Telegram voice processing failed: {}", exc)
+                await update.effective_chat.send_message(
+                    "Sorry, I couldn't process that voice message right now. Please try again.",
+                )
+                return
+
+            if not transcript:
+                await update.effective_chat.send_message(
+                    "I couldn't transcribe that voice message. Could you try again or send text?",
+                )
+                return
 
             msg = InboundMessage(
                 channel="telegram",
                 chat_id=ids[0],
                 user_id=ids[1],
-                text=f"[User sent a voice message ({duration}s). Voice transcription is not yet supported.]",
+                text=transcript,
                 metadata={
-                    "message_id": str(update.message.message_id),
+                    "message_id": message_id,
                     "type": "voice",
                     "duration": duration,
+                    "transcript_source": "elevenlabs_scribe_v1",
                 },
             )
             await bus.push_inbound(msg)
@@ -447,6 +712,7 @@ class TelegramChannel(BaseChannel):
         command_handlers = {
             "start": cmd_start,
             "help": cmd_help,
+            "info": cmd_info,
             "new": cmd_new,
             "status": cmd_status,
             "model": cmd_model,
@@ -489,6 +755,10 @@ class TelegramChannel(BaseChannel):
     async def send(self, chat_id: str, text: str, **kwargs) -> None:
         if not self._app or not self._app.bot:
             logger.error("Telegram: cannot send, bot not initialized")
+            return
+
+        # Optional voice response via ElevenLabs TTS
+        if await self._send_tts_voice(chat_id, text):
             return
 
         html_text = _markdown_to_telegram_html(text)
@@ -576,3 +846,74 @@ class TelegramChannel(BaseChannel):
             except Exception as fallback_exc:
                 logger.error("Telegram: file send failed completely: {}", fallback_exc)
                 await self.send(chat_id, f"Failed to send file: {path.name}")
+
+    @staticmethod
+    def _transcribe_with_elevenlabs(audio_path: Path, api_key: str) -> str:
+        """Transcribe voice/audio with ElevenLabs Scribe v1."""
+        with audio_path.open("rb") as f:
+            resp = requests.post(
+                ELEVENLABS_STT_URL,
+                headers={"xi-api-key": api_key},
+                files={"file": (audio_path.name, f, "audio/ogg")},
+                data={"model_id": "scribe_v1"},
+                timeout=90,
+            )
+        if not resp.ok:
+            logger.warning("ElevenLabs STT failed: status={} body={}", resp.status_code, resp.text[:500])
+            return ""
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            logger.warning("ElevenLabs STT returned non-JSON response: {}", exc)
+            return ""
+        return str(payload.get("text", "") or "").strip()
+
+    @staticmethod
+    def _synthesize_with_elevenlabs(text: str, api_key: str, out_path: Path) -> bool:
+        """Synthesize speech with ElevenLabs TTS and write audio bytes to out_path."""
+        resp = requests.post(
+            ELEVENLABS_TTS_URL,
+            headers={
+                "xi-api-key": api_key,
+                "Accept": "audio/ogg",
+                "Content-Type": "application/json",
+            },
+            params={"output_format": "ogg_44100_128"},
+            json={
+                "text": text,
+                "model_id": "eleven_multilingual_v2",
+            },
+            timeout=90,
+        )
+        if not resp.ok:
+            logger.warning("ElevenLabs TTS failed: status={} body={}", resp.status_code, resp.text[:500])
+            return False
+        out_path.write_bytes(resp.content)
+        return True
+
+    async def _send_tts_voice(self, chat_id: str, text: str) -> bool:
+        """Send synthesized voice response to Telegram when enabled."""
+        if not _is_tts_enabled():
+            return False
+        api_key = _get_elevenlabs_api_key()
+        if not api_key:
+            logger.warning("Telegram TTS enabled but tools.extra.elevenlabs_api_key is missing")
+            return False
+
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        try:
+            ok = await asyncio.to_thread(self._synthesize_with_elevenlabs, text, api_key, tmp_path)
+            if not ok:
+                return False
+            with tmp_path.open("rb") as vf:
+                await self._app.bot.send_voice(
+                    chat_id=_parse_chat_id(chat_id),
+                    voice=vf,
+                )
+            return True
+        except Exception as exc:
+            logger.warning("Telegram TTS voice send failed: {}", exc)
+            return False
+        finally:
+            tmp_path.unlink(missing_ok=True)

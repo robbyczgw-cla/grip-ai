@@ -6,6 +6,23 @@
 
 ---
 
+
+## 2026-03-04: /info Command + Info API Endpoint
+
+### Telegram /info command
+- Rich system status dashboard via  command in Telegram
+- Shows: model + effort, uptime + version, memory stats, cron jobs,
+  tools/skills loaded, API key status, cache stats, Graz weather, today's activity
+- Auto-fetches from new  endpoint + wttr.in weather
+
+### API: GET /api/v1/info
+- New comprehensive info endpoint in management router
+- Aggregates: model config, uptime, memory size, history count, cron jobs,
+  skills list, API key status (from config file), cache stats, session count,
+  today's messages, last memory update, channel status
+- Used by both Telegram /info and GripCami dashboard
+
+
 ## 🔍 Web Search
 
 ### Serper as Search Fallback (commit `09ae644`)
