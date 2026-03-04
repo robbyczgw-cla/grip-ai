@@ -98,8 +98,38 @@ class WebSearchTool(Tool):
             if result:
                 return result
 
+        # Try Serper (Google) if API key is available
+        serper_key = ctx.extra.get("serper_api_key", "")
+        if not serper_key:
+            import os
+            serper_key = os.environ.get("SERPER_API_KEY", "")
+        if serper_key:
+            result = await self._search_serper(query, max_results, serper_key)
+            if result:
+                return result
+
         # Fallback to DuckDuckGo HTML scrape
         return await self._search_duckduckgo(query, max_results)
+
+    async def _search_serper(self, query: str, max_results: int, api_key: str) -> str:
+        try:
+            async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT) as client:
+                resp = await client.post(
+                    "https://google.serper.dev/search",
+                    json={"q": query, "num": max_results},
+                    headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                results = []
+                for item in data.get("organic", [])[:max_results]:
+                    title = item.get("title", "")
+                    url = item.get("link", "")
+                    snippet = item.get("snippet", "")
+                    results.append(f"**{title}**\n{url}\n{snippet}")
+                return "\n\n".join(results) if results else ""
+        except Exception:
+            return ""
 
     async def _search_brave(self, query: str, max_results: int, api_key: str) -> str:
         try:
