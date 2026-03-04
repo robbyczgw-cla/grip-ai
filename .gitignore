@@ -34,3 +34,28 @@ TASKS.md
 Docs/
 Architecture.md
 .claude/
+
+# grip runtime & user data - NEVER commit these
+config.json
+*.grip/
+workspace/
+memory/
+sessions/
+logs/
+state/
+
+# grip workspace personal files
+AGENT.md
+SOUL.md
+USER.md
+IDENTITY.md
+TOOLS.md
+SHIELD.md
+
+# API keys & tokens
+.claude/
+.claude.json
+
+# Local dev overrides
+.env.local
+local_settings.py
