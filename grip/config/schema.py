@@ -132,7 +132,7 @@ class AgentDefaults(BaseModel):
         description="SDK permission mode: 'acceptEdits', 'bypassPermissions', or 'default'.",
     )
     sdk_effort: str | None = Field(
-        default=None,
+        default="medium",
         description="Adaptive thinking effort level: 'low', 'medium', 'high', or 'max' (opus only). "
         "Enables adaptive thinking via the --effort CLI flag. None = disabled.",
     )
@@ -284,7 +284,7 @@ class MCPServerConfig(BaseModel):
         description="When False, server is skipped during connection without deleting config.",
     )
     oauth: OAuthConfig | None = Field(
-        default=None,
+        default="medium",
         description="OAuth 2.0 config for servers requiring browser-based login.",
     )
 
