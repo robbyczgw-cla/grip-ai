@@ -736,6 +736,7 @@ async def get_info(
         "context_tokens_estimated": 0,
         "context_flush_threshold": 15000,
         "context_flush_enabled": True,
+        "dynamic_tool_selection_enabled": True,
     }
     try:
         engine = getattr(request.app.state, "engine", None)
@@ -784,4 +785,5 @@ async def get_info(
         "context_tokens_estimated": context_flush_info.get("context_tokens_estimated", 0),
         "context_flush_threshold": context_flush_info.get("context_flush_threshold", 15000),
         "context_flush_enabled": context_flush_info.get("context_flush_enabled", True),
+        "dynamic_tool_selection_enabled": context_flush_info.get("dynamic_tool_selection_enabled", True),
     }

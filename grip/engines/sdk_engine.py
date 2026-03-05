@@ -104,6 +104,7 @@ class SDKRunner(EngineProtocol):
         # Context flush controls for long Claude SDK conversations
         self._context_flush_enabled: bool = True
         self._context_flush_threshold: int = 15000
+        self._dynamic_tool_selection_enabled: bool = True
         self._load_context_flush_config()
         self._context_flush_pending_sessions: set[str] = set()
         self._context_baseline_chars_by_session: dict[str, int] = {}
@@ -122,6 +123,9 @@ class SDKRunner(EngineProtocol):
                 self._context_flush_enabled = enabled
             if threshold is not None:
                 self._context_flush_threshold = max(1, int(threshold))
+            dynamic_tool_selection = raw.get("dynamic_tool_selection")
+            if isinstance(dynamic_tool_selection, bool):
+                self._dynamic_tool_selection_enabled = dynamic_tool_selection
         except Exception as exc:
             logger.debug("Failed to load context flush config: {}", exc)
 
@@ -132,6 +136,7 @@ class SDKRunner(EngineProtocol):
             "context_tokens_estimated": int(max_estimate),
             "context_flush_threshold": int(self._context_flush_threshold),
             "context_flush_enabled": bool(self._context_flush_enabled),
+            "dynamic_tool_selection_enabled": bool(self._dynamic_tool_selection_enabled),
         }
 
     # -- Callback wiring (called by gateway to route messages to channels) --
@@ -264,6 +269,62 @@ class SDKRunner(EngineProtocol):
         parts.append(metadata)
 
         return "\n\n---\n\n".join(parts)
+
+    def _select_tools_for_message(self, user_message: str, all_tools: list) -> list:
+        """Select a subset of tools based on user message keywords."""
+        if not self._dynamic_tool_selection_enabled:
+            return all_tools
+
+        tool_categories = {
+            "core": ["send_message", "send_file"],
+            "memory": [
+                "remember",
+                "recall",
+                "semantic_recall",
+                "summarize_today",
+                "summarize_month",
+                "list_memory_archives",
+                "read_memory_archive",
+            ],
+            "weather": ["get_weather"],
+            "youtube": ["youtube_transcript"],
+            "twitter": ["twitter_search"],
+            "search": ["web_search"],
+            "audio": ["transcribe_voice"],
+        }
+
+        keyword_map = {
+            "weather": ["wetter", "weather", "temperatur", "regen", "forecast", "grad"],
+            "youtube": ["youtube", "video", "transcript", "yt.be", "youtu"],
+            "twitter": ["twitter", "tweet", "x.com", "twit"],
+            "search": ["search", "suche", "google", "find", "was ist", "who is", "what is", "wie"],
+            "memory": ["remember", "recall", "merke", "erinnerung", "vergiss nicht", "archive", "gestern gesagt"],
+            "audio": [],
+        }
+
+        message = (user_message or "").lower()
+        selected_categories = {"core", "memory"}
+
+        for category, keywords in keyword_map.items():
+            if any(keyword in message for keyword in keywords):
+                selected_categories.add(category)
+
+        specific_categories = selected_categories - {"core", "memory"}
+        if not specific_categories:
+            selected = all_tools
+        else:
+            selected_tool_names = {
+                tool_name
+                for category in selected_categories
+                for tool_name in tool_categories.get(category, [])
+            }
+            selected = [
+                t for t in all_tools
+                if hasattr(t, "name") and t.name in selected_tool_names
+            ]
+
+        logger.debug(f"Dynamic tools: {[t.name for t in selected]}")
+        return selected
 
     # -- Custom tool definitions --
 
@@ -925,7 +986,10 @@ class SDKRunner(EngineProtocol):
         Uses ClaudeSDKClient to run the agent loop, collecting the final result
         and tool call names. Persists the exchange to history via MemoryManager.
         """
-        custom_tools = self._custom_tools
+        if self._dynamic_tool_selection_enabled:
+            custom_tools = self._select_tools_for_message(user_message, self._custom_tools)
+        else:
+            custom_tools = self._custom_tools
 
         flush_notice = None
         flush_requested_for_this_turn = session_key in self._context_flush_pending_sessions
