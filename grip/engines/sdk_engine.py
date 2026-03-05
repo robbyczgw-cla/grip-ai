@@ -40,6 +40,7 @@ from claude_agent_sdk import (
 from loguru import logger
 
 from grip.engines.types import AgentRunResult, EngineProtocol
+from grip.providers.types import LLMMessage
 from grip.skills.loader import SkillsLoader
 
 if TYPE_CHECKING:
@@ -99,6 +100,39 @@ class SDKRunner(EngineProtocol):
         self._mcp_config: list[dict[str, Any]] = self._build_mcp_config()
         self._allowed_tools_base: list[str] = self._collect_allowed_tools()
         self._skills_cache: list = self._load_skills()
+
+        # Context flush controls for long Claude SDK conversations
+        self._context_flush_enabled: bool = True
+        self._context_flush_threshold: int = 15000
+        self._load_context_flush_config()
+        self._context_flush_pending_sessions: set[str] = set()
+        self._context_baseline_chars_by_session: dict[str, int] = {}
+        self._context_tokens_estimated_by_session: dict[str, int] = {}
+
+    def _load_context_flush_config(self) -> None:
+        """Load context flush settings from ~/.grip/config.json with safe defaults."""
+        cfg_path = Path.home() / ".grip" / "config.json"
+        if not cfg_path.exists():
+            return
+        try:
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+            enabled = raw.get("context_flush_enabled")
+            threshold = raw.get("context_flush_threshold")
+            if isinstance(enabled, bool):
+                self._context_flush_enabled = enabled
+            if threshold is not None:
+                self._context_flush_threshold = max(1, int(threshold))
+        except Exception as exc:
+            logger.debug("Failed to load context flush config: {}", exc)
+
+    def get_context_flush_info(self) -> dict[str, Any]:
+        """Expose context flush telemetry for /api/v1/info."""
+        max_estimate = max(self._context_tokens_estimated_by_session.values(), default=0)
+        return {
+            "context_tokens_estimated": int(max_estimate),
+            "context_flush_threshold": int(self._context_flush_threshold),
+            "context_flush_enabled": bool(self._context_flush_enabled),
+        }
 
     # -- Callback wiring (called by gateway to route messages to channels) --
 
@@ -165,7 +199,7 @@ class SDKRunner(EngineProtocol):
     # -- System prompt assembly --
 
     def _build_system_prompt(
-        self, user_message: str, session_key: str, custom_tools: list | None = None,
+        self, user_message: str, session_key: str, custom_tools: list | None = None, flush_notice: str | None = None,
     ) -> str:
         """Assemble the system prompt from identity files, memory, skills, and metadata.
 
@@ -215,6 +249,9 @@ class SDKRunner(EngineProtocol):
         if self._skills_cache:
             skill_lines = [f"- **{s.name}**: {s.description}" for s in self._skills_cache]
             parts.append("## Available Skills\n\n" + "\n".join(skill_lines))
+
+        if flush_notice:
+            parts.append(f"## Context Flush\n\n{flush_notice}")
 
         # Runtime metadata
         now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -889,7 +926,21 @@ class SDKRunner(EngineProtocol):
         and tool call names. Persists the exchange to history via MemoryManager.
         """
         custom_tools = self._custom_tools
-        system_prompt = self._build_system_prompt(user_message, session_key, custom_tools)
+
+        flush_notice = None
+        flush_requested_for_this_turn = session_key in self._context_flush_pending_sessions
+        if flush_requested_for_this_turn:
+            flush_notice = (
+                "⚠️ Conversation getting long. Please call remember() to save the most important "
+                "facts, decisions, and context from this conversation before we continue."
+            )
+
+        system_prompt = self._build_system_prompt(
+            user_message,
+            session_key,
+            custom_tools,
+            flush_notice=flush_notice,
+        )
         mcp_config = self._mcp_config
         allowed_tools = list(self._allowed_tools_base)
 
@@ -1000,6 +1051,34 @@ class SDKRunner(EngineProtocol):
         # Persist user message and agent response to conversation history
         self._memory_mgr.append_history(f"User ({session_key}): {user_message[:200]}")
         self._memory_mgr.append_history(f"Agent ({session_key}): {response_text[:200]}")
+
+        # Persist session transcript for SDK context estimation parity with LiteLLM engine
+        session = self._session_mgr.get_or_create(session_key)
+        session.add_message(LLMMessage(role="user", content=user_message))
+        session.add_message(LLMMessage(role="assistant", content=response_text))
+        self._session_mgr.save(session)
+
+        # Estimate current conversation tokens using chars/4 approximation
+        transcript_parts: list[str] = []
+        if session.summary:
+            transcript_parts.append(session.summary)
+        transcript_parts.extend((m.content or "") for m in session.messages if m.content)
+        total_chars = len("\n".join(transcript_parts))
+
+        baseline_chars = self._context_baseline_chars_by_session.get(session_key, 0)
+        if baseline_chars > total_chars:
+            baseline_chars = 0
+        estimated_tokens = max(0, (total_chars - baseline_chars) // 4)
+        self._context_tokens_estimated_by_session[session_key] = int(estimated_tokens)
+
+        if flush_requested_for_this_turn:
+            # Reset growth counter after flush turn completes.
+            self._context_baseline_chars_by_session[session_key] = total_chars
+            self._context_tokens_estimated_by_session[session_key] = 0
+            self._context_flush_pending_sessions.discard(session_key)
+        elif self._context_flush_enabled and estimated_tokens > self._context_flush_threshold:
+            self._context_flush_pending_sessions.add(session_key)
+            logger.info("Context flush triggered at ~{} tokens", estimated_tokens)
 
         return AgentRunResult(
             response=response_text,

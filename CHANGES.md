@@ -184,3 +184,27 @@ Implemented semantic memory and archive tooling in Grip.
 - Added `GET /api/v1/memory/archive?type=daily|monthly&date=YYYY-MM-DD|YYYY-MM`
   - returns archive content and metadata
 - Includes validation and non-destructive error handling.
+
+## 2026-03-05 — SDK context-aware memory flush for long conversations
+
+### SDK engine (`grip/engines/sdk_engine.py`)
+- Added context flush config loading from `~/.grip/config.json`:
+  - `context_flush_enabled` (default: `true`)
+  - `context_flush_threshold` (default: `15000`)
+- Added per-session context token estimation using char heuristic:
+  - `estimated_tokens = len(transcript_text) // 4`
+- Added flush trigger logic:
+  - when estimate exceeds threshold, mark session for next-turn flush
+  - log trigger with `logger.info("Context flush triggered at ~{} tokens", estimated_tokens)`
+- Added next-turn system prompt injection:
+  - `⚠️ Conversation getting long. Please call remember() to save the most important facts, decisions, and context from this conversation before we continue.`
+- Added post-flush counter reset behavior via per-session baseline after the flush turn.
+- SDK runner now persists user/assistant messages to `SessionManager` so context growth can be tracked continuously.
+- Added `get_context_flush_info()` for API telemetry.
+
+### API info endpoint (`grip/api/routers/management.py`)
+- Extended `/api/v1/info` response with:
+  - `context_tokens_estimated`
+  - `context_flush_threshold`
+  - `context_flush_enabled`
+- Uses SDK telemetry when available, safe defaults otherwise.

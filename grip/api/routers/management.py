@@ -731,6 +731,22 @@ async def get_info(
     semantic_memory["monthly_archives"] = _safe_archive_count(monthly_dir)
     semantic_memory["latest_daily"] = _latest_daily_archive(daily_dir)
 
+    # Context flush telemetry (SDK engine; safe fallback for others)
+    context_flush_info = {
+        "context_tokens_estimated": 0,
+        "context_flush_threshold": 15000,
+        "context_flush_enabled": True,
+    }
+    try:
+        engine = getattr(request.app.state, "engine", None)
+        getter = getattr(engine, "get_context_flush_info", None)
+        if callable(getter):
+            info = getter()
+            if isinstance(info, dict):
+                context_flush_info.update(info)
+    except Exception:
+        pass
+
     # Channels status
     channels_status = {}
     from grip.config.schema import ChannelsConfig
@@ -765,4 +781,7 @@ async def get_info(
         "last_memory_update": last_memory_update,
         "semantic_memory": semantic_memory,
         "channels": channels_status,
+        "context_tokens_estimated": context_flush_info.get("context_tokens_estimated", 0),
+        "context_flush_threshold": context_flush_info.get("context_flush_threshold", 15000),
+        "context_flush_enabled": context_flush_info.get("context_flush_enabled", True),
     }
