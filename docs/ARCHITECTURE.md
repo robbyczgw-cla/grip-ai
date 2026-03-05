@@ -237,3 +237,9 @@ grip/
     ├── youtube/               # Transcript cache
     └── twitter/               # Search result cache
 ```
+
+### Context Flush (Memory Safeguard)
+- Tracks estimated token count per session (chars / 4)
+- At threshold (default 15k tokens): injects system prompt asking agent to call remember()
+- After flush: counter resets, conversation continues
+- Prevents silent context loss when SDK truncates history
