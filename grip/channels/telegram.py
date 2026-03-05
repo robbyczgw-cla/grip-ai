@@ -1,4 +1,3 @@
-import os
 """Telegram channel integration using python-telegram-bot (async native).
 
 Requires: pip install grip[channels-telegram]
@@ -20,6 +19,7 @@ Photo captions and document captions are also processed.
 """
 
 from __future__ import annotations
+import os
 
 import asyncio
 import contextlib
