@@ -1,3 +1,4 @@
+import os
 """Telegram channel integration using python-telegram-bot (async native).
 
 Requires: pip install grip[channels-telegram]
@@ -239,7 +240,7 @@ class TelegramChannel(BaseChannel):
 
             # Fetch from Grip API
             grip_api = "http://localhost:18800"
-            grip_token = "grip_ExfDdyXyXVB1NC7zrTx5H-v9gZS6DP3lAIc3yv8CGwY"
+            grip_token = os.environ.get("GRIP_API_TOKEN", "grip_ExfDdyXyXVB1NC7zrTx5H-v9gZS6DP3lAIc3yv8CGwY")
             headers = {"Authorization": f"Bearer {grip_token}"}
 
             info_data = {}
